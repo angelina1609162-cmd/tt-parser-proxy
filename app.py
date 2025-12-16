@@ -1,250 +1,212 @@
 import re
-import time
+import json
 import logging
-from typing import List, Dict, Tuple, Set
-from urllib.parse import quote_plus
-
 import requests
-from flask import Flask, request, jsonify, render_template
 from bs4 import BeautifulSoup
-from transliterate import translit
-from rapidfuzz import fuzz
-from dateutil import parser as dateparser
-
-# =========================
-# CONFIG
-# =========================
-
-APP_NAME = "tt-parser-proxy"
-TIMEOUT = 12
-MAX_PROFILES = 12
-MAX_MATCHES_PER_SOURCE = 25
-FUZZY_THRESHOLD = 82
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8"
-}
-
-SEARCH_DOMAINS = [
-    "rttf.ru",
-    "scores24.live",
-    "aiscore.com",
-    "sofascore.com",
-    "flashscore.",
-]
-
-# =========================
-# INIT
-# =========================
+from flask import Flask, request, jsonify
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
 
-session = requests.Session()
-session.headers.update(HEADERS)
+# ---------------- CONFIG ----------------
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+}
+TIMEOUT = 15
+MAX_MATCHES = 20
+MIN_MATCHES = 7
 
-# =========================
-# UTILS
-# =========================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 
-def normalize_name(name: str) -> str:
-    name = name.lower().strip()
-    name = re.sub(r"[^a-zа-яё]", "", name)
-    return name
-
-def generate_name_variants(name: str) -> Set[str]:
-    variants = set()
-    base = normalize_name(name)
-    variants.add(base)
-
+# ---------------- UTILS ----------------
+def fetch(url):
     try:
-        en = translit(base, "ru", reversed=True)
-        variants.add(normalize_name(en))
-    except Exception:
-        pass
-
-    return variants
-
-def fuzzy_match(a: str, b: str) -> bool:
-    return fuzz.ratio(a, b) >= FUZZY_THRESHOLD
-
-def safe_get(url: str) -> str | None:
-    try:
-        r = session.get(url, timeout=TIMEOUT)
-        if r.status_code == 200 and len(r.text) > 500:
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        if r.status_code == 200 and len(r.text) > 1000:
             return r.text
-    except Exception:
-        return None
+    except Exception as e:
+        logging.warning(f"FETCH FAIL {url} | {e}")
     return None
 
-def parse_date(text: str) -> str | None:
-    try:
-        dt = dateparser.parse(text, dayfirst=True, fuzzy=True)
-        if dt:
-            return dt.date().isoformat()
-    except Exception:
-        pass
+
+def normalize_name(name):
+    return re.sub(r"[^a-zа-яё ]", "", name.lower())
+
+
+def parse_date(text):
+    for fmt in ("%d.%m.%Y", "%d.%m.%y"):
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except:
+            pass
     return None
 
-# =========================
-# PROFILE SEARCH (GOOGLE)
-# =========================
 
-def google_search_profiles(player: str) -> List[str]:
-    results = set()
-    variants = generate_name_variants(player)
+# ---------------- SEARCH (REAL) ----------------
+SEARCH_TEMPLATES = [
+    "https://duckduckgo.com/html/?q={q}",
+    "https://www.bing.com/search?q={q}"
+]
 
-    for name in variants:
-        query = f"{name} table tennis results profile"
-        url = f"https://www.google.com/search?q={quote_plus(query)}"
-        html = safe_get(url)
+
+def search_links(query):
+    links = set()
+    for tpl in SEARCH_TEMPLATES:
+        html = fetch(tpl.format(q=query))
         if not html:
             continue
-
-        soup = BeautifulSoup(html, "lxml")
+        soup = BeautifulSoup(html, "html.parser")
         for a in soup.select("a[href]"):
-            href = a["href"]
-            if href.startswith("/url?q="):
-                href = href.split("/url?q=")[1].split("&")[0]
+            href = a.get("href")
+            if href and any(x in href for x in [
+                "flashscore", "scores24", "aiscore",
+                "sofascore", "2score", "rttf", "betcity"
+            ]):
+                links.add(href.split("&")[0])
+    return list(links)
 
-            if any(d in href for d in SEARCH_DOMAINS):
-                results.add(href)
 
-            if len(results) >= MAX_PROFILES:
-                break
+# ---------------- PARSERS ----------------
+def parse_flashscore(url):
+    html = fetch(url)
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    out = []
+    for row in soup.select("div.event__match"):
+        date = row.select_one(".event__time")
+        opp = row.select_one(".event__participant--away")
+        score = row.select_one(".event__score")
+        if date and opp and score:
+            d = parse_date(date.text.strip())
+            if d:
+                out.append({
+                    "date": d,
+                    "opponent": opp.text.strip(),
+                    "score": score.text.strip(),
+                    "source": "flashscore"
+                })
+    return out
 
-    return list(results)
 
-# =========================
-# MATCH PARSING
-# =========================
+def parse_scores24(url):
+    html = fetch(url)
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    out = []
+    for row in soup.select("tr"):
+        cells = [c.text.strip() for c in row.select("td")]
+        if len(cells) >= 4:
+            d = parse_date(cells[0])
+            if d:
+                out.append({
+                    "date": d,
+                    "opponent": cells[2],
+                    "score": cells[3],
+                    "source": "scores24"
+                })
+    return out
 
-def extract_matches_generic(html: str, player: str) -> List[Dict]:
-    soup = BeautifulSoup(html, "lxml")
-    matches = []
-    player_norms = generate_name_variants(player)
 
-    for row in soup.find_all("tr"):
-        cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
-        if len(cells) < 4:
-            continue
+def parse_aiscore(url):
+    html = fetch(url)
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    out = []
+    for row in soup.select("div.match-row"):
+        date = row.select_one(".date")
+        opp = row.select_one(".away")
+        score = row.select_one(".score")
+        if date and opp and score:
+            d = parse_date(date.text)
+            if d:
+                out.append({
+                    "date": d,
+                    "opponent": opp.text.strip(),
+                    "score": score.text.strip(),
+                    "source": "aiscore"
+                })
+    return out
 
-        date = parse_date(cells[0])
-        if not date:
-            continue
 
-        opponent = None
-        score = None
+PARSERS = {
+    "flashscore": parse_flashscore,
+    "scores24": parse_scores24,
+    "aiscore": parse_aiscore,
+}
 
-        for c in cells:
-            if ":" in c and re.search(r"\d+:\d+", c):
-                score = c
-            if re.search(r"[A-Za-zА-Яа-я]", c):
-                opponent = c
 
-        if not opponent or not score:
-            continue
+# ---------------- VALIDATOR ----------------
+def validate(matches):
+    by_date = {}
+    for m in matches:
+        key = (m["date"], m["opponent"], m["score"])
+        by_date.setdefault(key, []).append(m["source"])
 
-        opp_norm = normalize_name(opponent)
-        if any(fuzzy_match(opp_norm, p) for p in player_norms):
-            continue  # сам с собой
+    validated = []
+    for (date, opp, score), srcs in by_date.items():
+        if len(set(srcs)) >= 2:
+            validated.append({
+                "date": date,
+                "opponent": opp,
+                "score": score,
+                "sources": list(set(srcs))
+            })
 
-        matches.append({
-            "date": date,
-            "opponent": opponent,
-            "score": score
-        })
+    validated.sort(key=lambda x: x["date"], reverse=True)
+    return validated[:MAX_MATCHES]
 
-        if len(matches) >= MAX_MATCHES_PER_SOURCE:
-            break
 
-    return matches
+# ---------------- API ----------------
+@app.route("/api/find_ids")
+def find_ids():
+    name = request.args.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "empty name"}), 400
 
-# =========================
-# CORE LOGIC
-# =========================
+    q = f"{name} настольный теннис профиль результаты"
+    links = search_links(q)
 
-def collect_player_matches(player: str) -> Tuple[List[Dict], List[str]]:
-    logs = []
+    logging.info(f"IDS FOUND {name}: {len(links)}")
+    return jsonify({"name": name, "links": links})
+
+
+@app.route("/api/matches")
+def get_matches():
+    links = request.args.getlist("link")
     all_matches = []
 
-    profiles = google_search_profiles(player)
-    logs.append(f"profiles_found={len(profiles)}")
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futures = []
+        for link in links:
+            for key, parser in PARSERS.items():
+                if key in link:
+                    futures.append(ex.submit(parser, link))
 
-    for url in profiles:
-        html = safe_get(url)
-        if not html:
-            logs.append(f"fail_load: {url}")
-            continue
+        for f in as_completed(futures):
+            try:
+                all_matches.extend(f.result())
+            except Exception as e:
+                logging.error(f"PARSER FAIL {e}")
 
-        matches = extract_matches_generic(html, player)
-        if matches:
-            all_matches.extend(matches)
-            logs.append(f"ok {url} -> {len(matches)}")
-        else:
-            logs.append(f"no_matches {url}")
-
-    # дедупликация
-    uniq = {}
-    for m in all_matches:
-        key = (m["date"], m["opponent"], m["score"])
-        uniq[key] = m
-
-    final = sorted(
-        uniq.values(),
-        key=lambda x: x["date"],
-        reverse=True
-    )[:20]
-
-    return final, logs
-
-# =========================
-# ROUTES
-# =========================
-
-@app.route("/")
-def index():
-    return """
-    <html>
-    <head><meta charset="utf-8"><title>TT Parser</title></head>
-    <body>
-      <h3>TT Parser</h3>
-      <form action="/api/search">
-        <input name="p1" placeholder="Игрок 1"><br><br>
-        <input name="p2" placeholder="Игрок 2"><br><br>
-        <button>Поиск</button>
-      </form>
-    </body>
-    </html>
-    """
-
-@app.route("/api/search")
-def api_search():
-    p1 = request.args.get("p1", "").strip()
-    p2 = request.args.get("p2", "").strip()
-
-    if not p1 or not p2:
-        return jsonify({"error": "need two players"}), 400
-
-    m1, log1 = collect_player_matches(p1)
-    m2, log2 = collect_player_matches(p2)
+    validated = validate(all_matches)
 
     return jsonify({
-        "player1": p1,
-        "matches1": m1,
-        "player2": p2,
-        "matches2": m2,
-        "audit": log1 + log2
+        "validated_count": len(validated),
+        "matches": validated
     })
 
-# =========================
-# ENTRY
-# =========================
+
+@app.route("/")
+def root():
+    return "TT parser API OK"
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    app.run(host="0.0.0.0", port=10000)
