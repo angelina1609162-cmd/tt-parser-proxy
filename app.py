@@ -1,159 +1,82 @@
-from flask import Flask, request, jsonify
-import requests
-from bs4 import BeautifulSoup
-import os
-import re
-from urllib.parse import quote
+from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
+HTML_PAGE = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>TT Parser Proxy</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            background: #0e0e0e;
+            color: #eaeaea;
+            font-family: Arial, sans-serif;
+            padding: 20px;
+        }
+        h1 { color: #4caf50; }
+        input, button {
+            padding: 10px;
+            margin: 5px 0;
+            width: 100%;
+            font-size: 16px;
+        }
+        button {
+            background: #4caf50;
+            border: none;
+            cursor: pointer;
+        }
+        pre {
+            background: #111;
+            padding: 10px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>TT Parser Proxy</h1>
+    <p>Введите фамилии игроков:</p>
+
+    <input id="p1" placeholder="Игрок 1">
+    <input id="p2" placeholder="Игрок 2">
+    <button onclick="search()">Искать</button>
+
+    <pre id="out"></pre>
+
+<script>
+async function search() {
+    const p1 = document.getElementById('p1').value;
+    const p2 = document.getElementById('p2').value;
+
+    const res = await fetch(`/api/search?p1=${encodeURIComponent(p1)}&p2=${encodeURIComponent(p2)}`);
+    const data = await res.json();
+    document.getElementById('out').textContent = JSON.stringify(data, null, 2);
 }
+</script>
+</body>
+</html>
+"""
 
-TIMEOUT = 15
+@app.route("/", methods=["GET"])
+def index():
+    return Response(HTML_PAGE, mimetype="text/html")
 
+@app.route("/api/search", methods=["GET"])
+def api_search():
+    p1 = request.args.get("p1", "")
+    p2 = request.args.get("p2", "")
 
-# ===== HEALTH CHECK =====
-@app.route("/")
-def home():
-    return "OK", 200
-
-
-# ===== UTILS =====
-def safe_get(url):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        if r.status_code == 200:
-            return r.text
-    except:
-        pass
-    return None
-
-
-def normalize_name(name):
-    return re.sub(r"\s+", " ", name.lower()).strip()
-
-
-# ===== FLASHCORE =====
-def flashscore_search(player):
-    url = f"https://www.flashscore.com/search/?q={quote(player)}"
-    html = safe_get(url)
-    results = []
-
-    if not html:
-        return results
-
-    soup = BeautifulSoup(html, "html.parser")
-    for row in soup.select("div.searchResult"):
-        if "table tennis" in row.get_text().lower():
-            results.append({
-                "source": "flashscore",
-                "text": row.get_text(strip=True)
-            })
-    return results
-
-
-# ===== SOFASCORE =====
-def sofascore_search(player):
-    url = f"https://www.sofascore.com/search/{quote(player)}"
-    html = safe_get(url)
-    results = []
-
-    if not html:
-        return results
-
-    soup = BeautifulSoup(html, "html.parser")
-    for a in soup.select("a"):
-        txt = a.get_text(strip=True)
-        if player.lower() in txt.lower():
-            results.append({
-                "source": "sofascore",
-                "text": txt
-            })
-    return results
-
-
-# ===== AISCORE =====
-def aiscore_search(player):
-    url = f"https://www.aiscore.com/search?keyword={quote(player)}"
-    html = safe_get(url)
-    results = []
-
-    if not html:
-        return results
-
-    soup = BeautifulSoup(html, "html.parser")
-    for div in soup.select("div"):
-        txt = div.get_text(strip=True)
-        if player.lower() in txt.lower() and "table" in txt.lower():
-            results.append({
-                "source": "aiscore",
-                "text": txt
-            })
-    return results
-
-
-# ===== SCORE24 / BETSITY MIRRORS =====
-def score24_search(player):
-    url = f"https://www.score24.live/search?q={quote(player)}"
-    html = safe_get(url)
-    results = []
-
-    if not html:
-        return results
-
-    soup = BeautifulSoup(html, "html.parser")
-    for div in soup.select("div"):
-        txt = div.get_text(strip=True)
-        if player.lower() in txt.lower():
-            results.append({
-                "source": "score24",
-                "text": txt
-            })
-    return results
-
-
-# ===== MAIN AGGREGATOR =====
-@app.route("/matches")
-def matches():
-    player = request.args.get("player")
-
-    if not player:
-        return jsonify({"error": "player parameter required"}), 400
-
-    player_norm = normalize_name(player)
-
-    data = {
-        "player": player,
-        "sources": {},
-        "total_hits": 0
-    }
-
-    sources = [
-        flashscore_search,
-        sofascore_search,
-        aiscore_search,
-        score24_search
-    ]
-
-    for src in sources:
-        try:
-            res = src(player_norm)
-            if res:
-                data["sources"][res[0]["source"]] = res
-                data["total_hits"] += len(res)
-        except:
-            continue
-
-    return jsonify(data)
-    
-
-# ===== RENDER ENTRY =====
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    return jsonify({
+        "status": "ok",
+        "player1": p1,
+        "player2": p2,
+        "sources": [
+            "flashscore",
+            "sofascore",
+            "aiscore",
+            "score24",
+            "betcity"
+        ],
+        "matches": []
+    })
