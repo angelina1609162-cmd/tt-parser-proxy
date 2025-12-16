@@ -1,4 +1,5 @@
-Flask==2.3.3
-requests==2.32.0
-beautifulsoup4==4.12.2
+Flask==3.0.3
+requests==2.32.3
+beautifulsoup4==4.12.3
 transliterate==1.10.2
+gunicorn==23.0.0
