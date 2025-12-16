@@ -12,16 +12,21 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 }
 
+# === Функции загрузки и поиска профилей ===
 def fetch_url(url):
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
+        r = requests.get(url, headers=HEADERS, timeout=15)
         if r.status_code == 200:
             return r.text
-    except Exception as e:
+    except Exception:
         return None
     return None
 
 def search_profiles(name_ru):
+    """
+    Мультиисточниковый поиск профилей через Google.
+    Возвращает уникальные ссылки на RTTF, Sofascore, Scores24, Flashscore, Aiscore, Betcity.
+    """
     name_en = translit(name_ru, 'ru', reversed=True).lower().replace(' ', '-')
     queries = [
         f"{name_ru} настольный теннис профиль результаты статистика",
@@ -31,7 +36,8 @@ def search_profiles(name_ru):
     for q in queries:
         search_url = f"https://www.google.com/search?q={quote_plus(q)}"
         html = fetch_url(search_url)
-        if not html: continue
+        if not html:
+            continue
         soup = BeautifulSoup(html, "html.parser")
         for a in soup.find_all('a', href=True):
             href = a['href']
@@ -41,6 +47,7 @@ def search_profiles(name_ru):
                 profiles.add(href)
     return list(profiles)
 
+# === Нормализация данных ===
 def normalize_opponent(opp):
     return re.sub(r'[^a-zа-я]', '', opp.lower())
 
@@ -48,10 +55,12 @@ def normalize_date(date_str):
     match = re.match(r'(\d{2})\.(\d{2})\.(\d{4}|\d{2})', date_str)
     if match:
         d, m, y = match.groups()
-        if len(y) == 2: y = '20' + y
+        if len(y) == 2:
+            y = '20' + y
         return f"{y}-{m}-{d}"
     return None
 
+# === Парсеры по сайтам ===
 def parse_rttf(html):
     soup = BeautifulSoup(html, "html.parser")
     matches = []
@@ -69,7 +78,7 @@ def parse_rttf(html):
 def parse_sofascore(html):
     soup = BeautifulSoup(html, "html.parser")
     matches = []
-    items = soup.find_all('div', {'class': re.compile('MatchRow')})  # приблизительно
+    items = soup.find_all('div', {'class': re.compile('MatchRow')})
     for item in items:
         date_el = item.find('div', text=re.compile(r'\d{2}\.\d{2}'))
         if date_el:
@@ -93,6 +102,7 @@ def parse_generic(html):
                 matches.append((date, normalize_opponent(opponent), score))
     return matches[-20:]
 
+# === Получение матчей из всех профилей ===
 def get_matches_from_profiles(profiles):
     matches_set = set()
     logs = []
@@ -115,8 +125,10 @@ def get_matches_from_profiles(profiles):
                 logs.append(f"Успех {url}: {len(src_matches)} матчей")
             else:
                 logs.append(f"Нет матчей в {url}")
+    # сортировка по дате
     return sorted(list(matches_set), reverse=True)[:20], logs
 
+# === Flask маршруты ===
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -134,8 +146,6 @@ def api_search():
     matches1, logs1 = get_matches_from_profiles(profiles1)
     matches2, logs2 = get_matches_from_profiles(profiles2)
 
-    # Для H2H можно добавить отдельный поиск пары, но пока упрощённо
-
     return jsonify({
         "player1": p1,
         "matches1": [f"{d} vs {o} {s}" for d, o, s in matches1],
@@ -145,4 +155,4 @@ def api_search():
     })
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host="0.0.0.0", port=5000)
