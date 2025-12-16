@@ -1,7 +1,12 @@
 Flask==3.0.3
+gunicorn==23.0.0
+
 requests==2.32.3
 beautifulsoup4==4.12.3
+lxml==5.2.2
+
 transliterate==1.10.2
-gunicorn==23.0.0
-selenium==4.14.0
-webdriver-manager>=4.0.0,<5.0.0
+python-Levenshtein==0.25.1
+
+urllib3==2.2.2
+certifi==2024.7.4
