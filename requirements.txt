@@ -1,5 +1,4 @@
-flask
-gunicorn
-requests
-beautifulsoup4
-lxml
+Flask==2.3.3
+requests==2.32.0
+beautifulsoup4==4.12.2
+transliterate==1.10.2
