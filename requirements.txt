@@ -4,6 +4,4 @@ beautifulsoup4==4.12.3
 transliterate==1.10.2
 gunicorn==23.0.0
 selenium==4.14.0
-webdriver-manager==4.9.2
-lxml==4.9.3
-python-dotenv==1.0.0
+webdriver-manager>=4.0.0,<5.0.0
